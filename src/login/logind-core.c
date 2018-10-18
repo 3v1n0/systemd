@@ -237,29 +237,27 @@ int manager_add_button(Manager *m, const char *name, Button **_button) {
         return 0;
 }
 
-static bool device_is_fb (struct sd_device *d)
+static int device_is_master_of_seat(sd_device *d, bool *is_master)
 {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *drm = NULL;
+        sd_device *card, *parent;
+        const char *id_path;
         const char *subsystem;
         int r;
 
         assert(d);
 
-        r = sd_device_get_subsystem (d, &subsystem);
+        *is_master = sd_device_has_tag(d, "master-of-seat") > 0;
+        if (!*is_master)
+                return 0;
 
-        return r >=0 && strcmp(subsystem, "graphics") == 0 ? true : false;
-}
+        /* Ignore fb master devices that have an associated drm device */
+        r = sd_device_get_subsystem(d, &subsystem);
+        if (r < 0)
+                return r;
 
-static int fb_device_has_drm(sd_device *d, int *has_drm)
-{
-        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *drm = NULL;
-        sd_device *card, *parent;
-        const char *id_path;
-        int r;
-
-        assert(d);
-        assert(device_is_fb(d));
-
-        *has_drm = 0;
+        if (strcmp(subsystem, "graphics") != 0)
+                return 0;
 
         r = sd_device_enumerator_new(&drm);
         if (r < 0)
@@ -290,7 +288,7 @@ static int fb_device_has_drm(sd_device *d, int *has_drm)
                         return r;
 
                 if (dev_path != NULL) {
-                        *has_drm = 1;
+                        *is_master = false;
                         break;
                 }
         }
@@ -334,14 +332,9 @@ int manager_process_seat_device(Manager *m, sd_device *d) {
                 }
 
                 seat = hashmap_get(m->seats, sn);
-                master = sd_device_has_tag(d, "master-of-seat") > 0;
-
-                /* Ignore master devices that have an associated drm device */
-                if (master && device_is_fb(d)) {
-                        int has_drm;
-                        if ((master = fb_device_has_drm (d, &has_drm)) >= 0)
-                                master = !has_drm;
-                }
+                r = device_is_master_of_seat(d, &master);
+                if (r < 0)
+                        return r;
 
                 /* Ignore non-master devices for unknown seats */
                 if (!master && !seat)
