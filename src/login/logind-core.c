@@ -237,6 +237,67 @@ int manager_add_button(Manager *m, const char *name, Button **_button) {
         return 0;
 }
 
+static bool device_is_fb (struct sd_device *d)
+{
+        const char *subsystem;
+        int r;
+
+        assert(d);
+
+        r = sd_device_get_subsystem (d, &subsystem);
+
+        return r >=0 && strcmp(subsystem, "graphics") == 0 ? true : false;
+}
+
+static int fb_device_has_drm(sd_device *d, int *has_drm)
+{
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *drm = NULL;
+        sd_device *card, *parent;
+        const char *id_path;
+        int r;
+
+        assert(d);
+        assert(device_is_fb(d));
+
+        *has_drm = 0;
+
+        r = sd_device_enumerator_new(&drm);
+        if (r < 0)
+                return r;
+
+        r = sd_device_get_parent(d, &parent);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_parent(drm, parent);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_subsystem(drm, "drm", 0);
+        if (r < 0)
+                return r;
+
+        (void) sd_device_get_property_value(d, "ID_PATH", &id_path);
+        r = sd_device_enumerator_add_match_property(drm, "ID_PATH", id_path);
+        if (r < 0)
+                return r;
+
+        FOREACH_DEVICE(drm, card) {
+                const char *dev_path;
+
+                r = sd_device_get_devpath(card, &dev_path);
+                if (r < 0)
+                        return r;
+
+                if (dev_path != NULL) {
+                        *has_drm = 1;
+                        break;
+                }
+        }
+
+        return 0;
+}
+
 int manager_process_seat_device(Manager *m, sd_device *d) {
         const char *action;
         Device *device;
@@ -274,6 +335,13 @@ int manager_process_seat_device(Manager *m, sd_device *d) {
 
                 seat = hashmap_get(m->seats, sn);
                 master = sd_device_has_tag(d, "master-of-seat") > 0;
+
+                /* Ignore master devices that have an associated drm device */
+                if (master && device_is_fb(d)) {
+                        int has_drm;
+                        if ((master = fb_device_has_drm (d, &has_drm)) >= 0)
+                                master = !has_drm;
+                }
 
                 /* Ignore non-master devices for unknown seats */
                 if (!master && !seat)
